@@ -6,6 +6,7 @@ import pytz
 import shutil
 import six
 import tempfile
+import time
 
 from collections import defaultdict
 from datetime import datetime
@@ -13,6 +14,7 @@ from io import StringIO, BytesIO
 
 from flask import Flask
 from structlog import get_logger
+from werkzeug.http import http_date
 
 from .config import configure
 from .encoders import JSONEncoder
@@ -227,9 +229,9 @@ def prune_datapoints(series, max_datapoints, start, end):
         )
         seconds_per_point = values_per_point * series.step
         nudge = (
-            seconds_per_point
-            + (series.start % series.step)
-            - (series.start % seconds_per_point)
+            seconds_per_point +
+            (series.start % series.step) -
+            (series.start % seconds_per_point)
         )
         series.start += nudge
         values_to_lose = nudge // series.step
@@ -357,6 +359,10 @@ def render():
             return response
 
     headers = {
+        'Last-Modified': http_date(time.time()),
+        'Expires': http_date(time.time() + (cache_timeout or 60)),
+        'Cache-Control': 'max-age={0}'.format(cache_timeout or 60)
+    } if use_cache else {
         'Pragma': 'no-cache',
         'Cache-Control': 'no-cache',
     }
@@ -364,6 +370,7 @@ def render():
     context = {
         'startTime': request_options['startTime'],
         'endTime': request_options['endTime'],
+        'tzinfo': request_options['tzinfo'],
         'data': [],
     }
 

@@ -1,6 +1,10 @@
 import copy
 import time
 
+from datetime import datetime
+
+import pytz
+
 from mock import patch, call, MagicMock
 
 from graphite_api import functions
@@ -984,6 +988,7 @@ class FunctionsTest(TestCase):
         ctx = {
             'startTime': parseATTime('-1min'),
             'endTime': parseATTime('now'),
+            'tzinfo': pytz.timezone('UTC'),
         }
         series = self._generate_series_list(config=[range(100)])
         for s in series:
@@ -1002,6 +1007,9 @@ class FunctionsTest(TestCase):
 
         summ = functions.smartSummarize(ctx, series, '5s', 'min')[0]
         self.assertEqual(summ[:3], [42, 47, 52])
+
+        # Higher time interval should not trigger timezone errors
+        functions.smartSummarize(ctx, series, '100s', 'min')[0]
 
     def test_summarize(self):
         series = self._generate_series_list(config=[list(range(99)) + [None]])
@@ -1048,3 +1056,55 @@ class FunctionsTest(TestCase):
         t.pathExpression = 't'
         [series] = functions.sumSeries({}, [s, t])
         self.assertEqual(list(series), [None, 1])
+
+    def test_multiply_with_wildcards(self):
+        s1 = [
+            TimeSeries('web.host-1.avg-response.value', 0, 1, 1, [1, 10, 11]),
+            TimeSeries('web.host-2.avg-response.value', 0, 1, 1, [2, 20, 21]),
+            TimeSeries('web.host-3.avg-response.value', 0, 1, 1, [3, 30, 31]),
+            TimeSeries('web.host-4.avg-response.value', 0, 1, 1, [4, 40, 41]),
+        ]
+        s2 = [
+            TimeSeries('web.host-4.total-request.value', 0, 1, 1, [4, 8, 12]),
+            TimeSeries('web.host-3.total-request.value', 0, 1, 1, [3, 7, 11]),
+            TimeSeries('web.host-1.total-request.value', 0, 1, 1, [1, 5, 9]),
+            TimeSeries('web.host-2.total-request.value', 0, 1, 1, [2, 6, 10]),
+        ]
+        expected = [
+            TimeSeries('web.host-1', 0, 1, 1, [1, 50, 99]),
+            TimeSeries('web.host-2', 0, 1, 1, [4, 120, 210]),
+            TimeSeries('web.host-3', 0, 1, 1, [9, 210, 341]),
+            TimeSeries('web.host-4', 0, 1, 1, [16, 320, 492]),
+        ]
+        results = functions.multiplySeriesWithWildcards({}, s1 + s2, 2, 3)
+        self.assertEqual(results, expected)
+
+    def test_timeslice(self):
+        series = [
+            TimeSeries('test.value', 0, 600, 60,
+                       [None, 1, 2, 3, None, 5, 6, None, 7, 8, 9]),
+        ]
+
+        expected = [
+            TimeSeries('timeSlice(test.value, 180, 480)', 0, 600, 60,
+                       [None, None, None, 3, None, 5, 6, None, 7, None, None]),
+        ]
+
+        results = functions.timeSlice({
+            'startTime': datetime(1970, 1, 1, 0, 0, 0, 0, pytz.utc),
+            'endTime': datetime(1970, 1, 1, 0, 9, 0, 0, pytz.utc),
+            'data': [],
+        }, series, '00:03 19700101', '00:08 19700101')
+        self.assertEqual(results, expected)
+
+    def test_remove_emtpy(self):
+        series = [
+            TimeSeries('foo.bar', 0, 100, 10,
+                       [None, None, None, 0, 0, 0, 1, 1, 1, None]),
+            TimeSeries('foo.baz', 0, 100, 10, [None] * 10),
+            TimeSeries('foo.blah', 0, 100, 10,
+                       [None, None, None, 0, 0, 0, 0, 0, 0, None]),
+        ]
+
+        results = functions.removeEmptySeries({}, series)
+        self.assertEqual(results, [series[0], series[2]])
