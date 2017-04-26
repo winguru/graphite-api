@@ -1,10 +1,11 @@
 Flask
 Flask-Cache
 cairocffi
-pyparsing
+pyparsing>=1.5.7
 pytz
 pyyaml
 raven[flask]
 six
 structlog
 tzlocal
+scandir

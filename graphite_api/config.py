@@ -1,16 +1,17 @@
 import logging
 import os
 import structlog
+import traceback
 import warnings
 import yaml
 
+from flask import make_response
 from tzlocal import get_localzone
 from importlib import import_module
 from structlog.processors import (format_exc_info, JSONRenderer,
                                   KeyValueRenderer)
 
 from .middleware import CORS, TrailingSlash
-from .search import IndexSearcher
 from .storage import Store
 from . import DEBUG
 
@@ -39,15 +40,6 @@ default_conf = {
         'directories': [
             '/srv/graphite/whisper',
         ],
-    },
-    'carbon': {
-        'hosts': [
-            '127.0.0.1:7002',
-        ],
-        'timeout': 1,
-        'retry_delay': 15,
-        'carbon_prefix': 'carbon',
-        'replication_factor': 1,
     },
     'time_zone': get_localzone().zone,
 }
@@ -82,6 +74,11 @@ def load_by_path(path):
     return getattr(finder, klass)
 
 
+def error_handler(e):
+    return make_response(traceback.format_exc(), 500,
+                         {'Content-Type': 'text/plain'})
+
+
 def configure(app):
     config_file = os.environ.get('GRAPHITE_API_CONFIG',
                                  '/etc/graphite-api.yaml')
@@ -98,12 +95,6 @@ def configure(app):
 
     for key, value in list(default_conf.items()):
         config.setdefault(key, value)
-
-    if config['carbon'] is not None:
-        # carbon section having a bunch of values, keep default ones if
-        # they're not provided in an overriden config.
-        for key, value in list(default_conf['carbon'].items()):
-            config['carbon'].setdefault(key, value)
 
     app.statsd = None
     if 'statsd' in config:
@@ -136,19 +127,18 @@ def configure(app):
     for functions in config['functions']:
         loaded_config['functions'].update(load_by_path(functions))
 
-    if config['carbon'] is not None:
+    if 'carbon' in config:
         if 'hashing_keyfunc' in config['carbon']:
             config['carbon']['hashing_keyfunc'] = load_by_path(
                 config['carbon']['hashing_keyfunc'])
         else:
             config['carbon']['hashing_keyfunc'] = lambda x: x
-    loaded_config['carbon'] = config['carbon']
+    loaded_config['carbon'] = config.get('carbon', None)
 
     finders = []
     for finder in config['finders']:
         finders.append(load_by_path(finder)(config))
     loaded_config['store'] = Store(finders)
-    loaded_config['searcher'] = IndexSearcher(config['search_index'])
     app.config['GRAPHITE'] = loaded_config
     app.config['TIME_ZONE'] = config['time_zone']
     logger.info("configured timezone", timezone=app.config['TIME_ZONE'])
@@ -168,6 +158,8 @@ def configure(app):
 
     app.wsgi_app = TrailingSlash(CORS(app.wsgi_app,
                                       config.get('allowed_origins')))
+    if config.get('render_errors', True):
+        app.errorhandler(500)(error_handler)
 
 
 def configure_logging(config):

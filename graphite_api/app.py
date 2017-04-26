@@ -1,11 +1,8 @@
-import os
 import csv
 import json
 import math
 import pytz
-import shutil
 import six
-import tempfile
 import time
 
 from collections import defaultdict
@@ -19,17 +16,18 @@ from werkzeug.http import http_date
 from .config import configure
 from .encoders import JSONEncoder
 from .render.attime import parseATTime
-from .render.datalib import fetchData, TimeSeries
+from .render.datalib import fetchData
 from .render.glyph import GraphTypes
-from .render.grammar import grammar
 from .utils import RequestParams, hash_request
 
 logger = get_logger()
 
 
-def jsonify(data, status=200, jsonp=False, headers=None):
+def jsonify(data, status=200, headers=None):
     if headers is None:
         headers = {}
+
+    jsonp = RequestParams.get('jsonp', False)
 
     body = json.dumps(data, cls=JSONEncoder)
     if jsonp:
@@ -44,10 +42,6 @@ class Graphite(Flask):
     @property
     def store(self):
         return self.config['GRAPHITE']['store']
-
-    @property
-    def searcher(self):
-        return self.config['GRAPHITE']['searcher']
 
     @property
     def functions(self):
@@ -89,24 +83,6 @@ def events():
 
 
 # API calls that actually do something
-@app.route('/metrics/search', methods=methods)
-def metrics_search():
-    errors = {}
-    try:
-        max_results = int(RequestParams.get('max_results', 25))
-    except ValueError:
-        errors['max_results'] = 'must be an integer.'
-    if 'query' not in RequestParams:
-        errors['query'] = 'this parameter is required.'
-    if errors:
-        return jsonify({'errors': errors}, status=400)
-    results = sorted(app.searcher.search(
-        query=RequestParams['query'],
-        max_results=max_results,
-    ), key=lambda result: result['path'] or '')
-    return jsonify({'metrics': results})
-
-
 @app.route('/metrics', methods=methods)
 @app.route('/metrics/find', methods=methods)
 def metrics_find():
@@ -121,16 +97,26 @@ def metrics_find():
         errors['wildcards'] = 'must be 0 or 1.'
 
     try:
-        from_time = int(RequestParams.get('from', 0))
+        from_time = int(RequestParams.get('from', -1))
     except ValueError:
         errors['from'] = 'must be an epoch timestamp.'
     try:
-        until_time = int(RequestParams.get('until', 0))
+        until_time = int(RequestParams.get('until', -1))
     except ValueError:
         errors['until'] = 'must be an epoch timestamp.'
 
+    try:
+        node_position = int(RequestParams.get('position', -1))
+    except ValueError:
+        errors['position'] = 'must be an integer,'
+
+    if from_time == -1:
+        from_time = None
+    if until_time == -1:
+        until_time = None
+
     format = RequestParams.get('format', 'treejson')
-    if format not in ['treejson', 'completer']:
+    if format not in ['treejson', 'completer', 'nodelist']:
         errors['format'] = 'unrecognized format: "{0}".'.format(format)
 
     if 'query' not in RequestParams:
@@ -154,6 +140,12 @@ def metrics_find():
             200,
             {'Content-Type': 'application/json'}
         )
+    elif format == 'nodelist':
+        found = set()
+        for metric in matches:
+            nodes = metric.path.split('.')
+            found.add(nodes[node_position])
+        return jsonify({'nodes': sorted(found)})
 
     results = []
     for node in matches:
@@ -207,17 +199,22 @@ def metrics_expand():
     return jsonify({'results': results})
 
 
+def recurse(query, index):
+    """
+    Recursively walk across paths, adding leaves to the index as they're found.
+    """
+    for node in app.store.find(query):
+        if node.is_leaf:
+            index.add(node.path)
+        else:
+            recurse('{0}.*'.format(node.path), index)
+
+
 @app.route('/metrics/index.json', methods=methods)
 def metrics_index():
     index = set()
-    if os.path.exists(app.searcher.index_path):
-        with open(app.searcher.index_path, 'r') as f:
-            index = set([line.strip() for line in f if line])
-        if not index:
-            recurse('*', index)
-    else:
-        recurse('*', index)
-    return jsonify(sorted(index), jsonp=RequestParams.get('jsonp', False))
+    recurse('*', index)
+    return jsonify(sorted(index))
 
 
 def prune_datapoints(series, max_datapoints, start, end):
@@ -246,37 +243,20 @@ def prune_datapoints(series, max_datapoints, start, end):
     return {'target': series.name, 'datapoints': datapoints}
 
 
-def recurse(query, index):
-    """
-    Recursively walk across paths, adding leaves to the index as they're found.
-    """
-    for node in app.store.find(query):
-        if node.is_leaf:
-            index.add(node.path)
-        else:
-            recurse('{0}.*'.format(node.path), index)
-
-
-@app.route('/index', methods=['POST', 'PUT'])
-def build_index():
-    index = set()
-    recurse('*', index)
-    with tempfile.NamedTemporaryFile(delete=False) as index_file:
-        index_file.write('\n'.join(sorted(index)).encode('utf-8'))
-    shutil.move(index_file.name, app.searcher.index_path)
-    app.searcher.reload()
-    return jsonify({'success': True, 'entries': len(index)})
-
-
 @app.route('/render', methods=methods)
 def render():
+    # Start with some defaults
     errors = {}
     graph_options = {
         'width': 600,
         'height': 300,
     }
     request_options = {}
+
+    # Fill in the request_options
     graph_type = RequestParams.get('graphType', 'line')
+
+    # Fill in the request_options
     try:
         graph_class = GraphTypes[graph_type]
         request_options['graphType'] = graph_type
@@ -303,15 +283,20 @@ def render():
                 float(RequestParams['maxDataPoints']))
         except ValueError:
             errors['maxDataPoints'] = 'Must be an integer.'
+    if 'noNullPoints' in RequestParams:
+        request_options['noNullPoints'] = True
 
     if errors:
         return jsonify({'errors': errors}, status=400)
 
+    # Fill in the graph_options
     for opt in graph_class.customizable:
         if opt in RequestParams:
             value = RequestParams[opt]
             try:
-                value = int(value)
+                intvalue = int(value)
+                if str(intvalue) == str(value):
+                    value = intvalue
             except ValueError:
                 try:
                     value = float(value)
@@ -331,6 +316,7 @@ def render():
             errors['tz'] = "Unknown timezone: '{0}'.".format(tz)
     request_options['tzinfo'] = tzinfo
 
+    # Get the time interval for time-oriented graph types
     until_time = parseATTime(RequestParams.get('until', 'now'), tzinfo)
     from_time = parseATTime(RequestParams.get('from', '-1d'), tzinfo)
 
@@ -341,6 +327,12 @@ def render():
 
     request_options['startTime'] = start_time
     request_options['endTime'] = end_time
+
+    template = dict()
+    for key in RequestParams.keys():
+        if key.startswith('template['):
+            template[key[9:-1]] = RequestParams.get(key)
+    request_options['template'] = template
 
     use_cache = app.cache is not None and 'noCache' not in RequestParams
     cache_timeout = RequestParams.get('cacheTimeout')
@@ -371,8 +363,19 @@ def render():
         'startTime': request_options['startTime'],
         'endTime': request_options['endTime'],
         'tzinfo': request_options['tzinfo'],
+        'template': request_options['template'],
         'data': [],
     }
+
+    # Gather all data to take advantage of backends with fetch_multi
+    paths = []
+    for target in request_options['targets']:
+        if request_options['graphType'] == 'pie':
+            if ':' in target:
+                continue
+        if target.strip():
+            paths += pathsFromTarget(context, target)
+    data_store = fetchData(context, paths)
 
     if request_options['graphType'] == 'pie':
         for target in request_options['targets']:
@@ -384,7 +387,7 @@ def render():
                     errors['target'] = "Invalid target: '{0}'.".format(target)
                 context['data'].append((name, value))
             else:
-                series_list = evaluateTarget(context, target)
+                series_list = evaluateTarget(context, target, data_store)
 
                 for series in series_list:
                     func = app.functions[request_options['pieMode']]
@@ -398,7 +401,7 @@ def render():
         for target in request_options['targets']:
             if not target.strip():
                 continue
-            series_list = evaluateTarget(context, target)
+            series_list = evaluateTarget(context, target, data_store)
             context['data'].extend(series_list)
 
         request_options['format'] = request_options.get('format')
@@ -416,7 +419,10 @@ def render():
                                      ts.strftime("%Y-%m-%d %H:%M:%S"), value))
             response.seek(0)
             headers['Content-Type'] = 'text/csv'
-            return response.read(), 200, headers
+            response = (response.read(), 200, headers)
+            if use_cache:
+                app.cache.add(request_key, response, cache_timeout)
+            return response
 
         if request_options['format'] == 'json':
             series_data = []
@@ -427,6 +433,16 @@ def render():
                     series_data.append(prune_datapoints(
                         series, request_options['maxDataPoints'],
                         start_time, end_time))
+            elif 'noNullPoints' in request_options and any(context['data']):
+                for series in context['data']:
+                    values = []
+                    for (index, v) in enumerate(series):
+                        if v is not None:
+                            timestamp = series.start + (index * series.step)
+                            values.append((v, timestamp))
+                    if len(values) > 0:
+                        series_data.append({'target': series.name,
+                                            'datapoints': values})
             else:
                 for series in context['data']:
                     timestamps = range(series.start, series.end + series.step,
@@ -435,8 +451,36 @@ def render():
                     series_data.append({'target': series.name,
                                         'datapoints': datapoints})
 
-            return jsonify(series_data, headers=headers,
-                           jsonp=request_options.get('jsonp', False))
+            response = jsonify(series_data, headers=headers)
+            if use_cache:
+                app.cache.add(request_key, response, cache_timeout)
+            return response
+
+        if request_options['format'] == 'dygraph':
+            series_data = {}
+            labels = ['Time']
+            if any(context['data']):
+                datapoints = [[ts * 1000]
+                              for ts in range(context['data'][0].start,
+                                              context['data'][0].end,
+                                              context['data'][0].step)]
+                for series in context['data']:
+                    labels.append(series.name)
+                    for i, point in enumerate(series):
+                        datapoints[i].append(point)
+                series_data = {'labels': labels, 'data': datapoints}
+
+            return jsonify(series_data, headers=headers)
+
+        if request_options['format'] == 'rickshaw':
+            series_data = []
+            for series in context['data']:
+                timestamps = range(series.start, series.end, series.step)
+                datapoints = [{'x': x, 'y': y}
+                              for x, y in zip(timestamps, series)]
+                series_data.append(dict(target=series.name,
+                                   datapoints=datapoints))
+            return jsonify(series_data, headers=headers)
 
         if request_options['format'] == 'raw':
             response = StringIO()
@@ -447,10 +491,15 @@ def render():
                 response.write(u'\n')
             response.seek(0)
             headers['Content-Type'] = 'text/plain'
-            return response.read(), 200, headers
+            response = (response.read(), 200, headers)
+            if use_cache:
+                app.cache.add(request_key, response, cache_timeout)
+            return response
 
         if request_options['format'] == 'svg':
             graph_options['outputFormat'] = 'svg'
+        elif request_options['format'] == 'pdf':
+            graph_options['outputFormat'] = 'pdf'
 
     graph_options['data'] = context['data']
     image = doImageRender(request_options['graphClass'], graph_options)
@@ -463,54 +512,18 @@ def render():
                                       json.dumps(image.decode('utf-8'))),
                     200, headers)
     else:
-        ctype = 'image/svg+xml' if use_svg else 'image/png'
+        if use_svg:
+            ctype = 'image/svg+xml'
+        elif graph_options.get('outputFormat') == 'pdf':
+            ctype = 'application/x-pdf'
+        else:
+            ctype = 'image/png'
         headers['Content-Type'] = ctype
         response = image, 200, headers
 
     if use_cache:
         app.cache.add(request_key, response, cache_timeout)
     return response
-
-
-def evaluateTarget(requestContext, target):
-    tokens = grammar.parseString(target)
-    result = evaluateTokens(requestContext, tokens)
-
-    if isinstance(result, TimeSeries):
-        return [result]  # we have to return a list of TimeSeries objects
-
-    return result
-
-
-def evaluateTokens(requestContext, tokens):
-    if tokens.expression:
-        return evaluateTokens(requestContext, tokens.expression)
-
-    elif tokens.pathExpression:
-        return fetchData(requestContext, tokens.pathExpression)
-
-    elif tokens.call:
-        func = app.functions[tokens.call.funcname]
-        args = [evaluateTokens(requestContext,
-                               arg) for arg in tokens.call.args]
-        kwargs = dict([(kwarg.argname,
-                        evaluateTokens(requestContext, kwarg.args[0]))
-                       for kwarg in tokens.call.kwargs])
-        return func(requestContext, *args, **kwargs)
-
-    elif tokens.number:
-        if tokens.number.integer:
-            return int(tokens.number.integer)
-        elif tokens.number.float:
-            return float(tokens.number.float)
-        elif tokens.number.scientific:
-            return float(tokens.number.scientific[0])
-
-    elif tokens.string:
-        return tokens.string[1:-1]
-
-    elif tokens.boolean:
-        return tokens.boolean[0] == 'true'
 
 
 def tree_json(nodes, base_path, wildcards=False):
@@ -571,3 +584,6 @@ def doImageRender(graphClass, graphOptions):
     imageData = pngData.getvalue()
     pngData.close()
     return imageData
+
+
+from .evaluator import evaluateTarget, pathsFromTarget  # noqa

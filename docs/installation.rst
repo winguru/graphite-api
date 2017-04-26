@@ -5,34 +5,14 @@ Installation
 Debian / Ubuntu: native package
 ===============================
 
-If you run Debian 7 or Ubuntu 14.04 LTS, you can use `exoscale`_'s `community
-repository`_ which provides a self-contained build of graphite-api.
+If you run Debian 8 or Ubuntu 14.04 LTS, you can use one of the available
+packages which provides a self-contained build of graphite-api. Builds are
+available on the `releases`_ page.
 
-.. _exoscale: https://www.exoscale.ch
-.. _community repository: https://packagecloud.io/exoscale/community
+.. _releases: https://github.com/brutasse/graphite-api/releases
 
-First, add packagecloud's APT key::
-
-    curl https://packagecloud.io/gpg.key | sudo apt-key add -
-
-Then, create ``/etc/apt/sources.list.d/exoscale_community.list`` with the
-following content.
-
-On Debian (Wheezy)::
-
-    deb https://packagecloud.io/exoscale/community/debian/ wheezy main
-
-On Ubuntu (14.04 LTS)::
-
-    deb https://packagecloud.io/exoscale/community/ubuntu/ trusty main
-
-Then run::
-
-    sudo apt-get update
-    sudo apt-get install graphite-api
-
-Graphite-api should be running as a service and available on port 8888. The
-package contains all the :ref:`optional dependencies <extras>`.
+Once installed, Graphite-api should be running as a service and available on
+port 8888. The package contains all the :ref:`optional dependencies <extras>`.
 
 Python package
 ==============
@@ -90,7 +70,7 @@ extra dependencies:
   the `Flask-Cache docs`_ for supported cache types.
 
 
-.. _Sentry: http://sentry.readthedocs.org/en/latest/
+.. _Sentry: https://docs.getsentry.com
 .. _Cyanite: https://github.com/brutasse/graphite-cyanite
 .. _Flask-Cache docs: http://pythonhosted.org/Flask-Cache/#configuring-flask-cache
 

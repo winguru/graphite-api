@@ -19,7 +19,6 @@ Implemented API calls:
 
 * ``/metrics/find``
 * ``/metrics/expand``
-* ``/metrics/search`` (removed strange ``keep_query_pattern`` parameter)
 * ``/render``
 
 No-ops:
@@ -28,18 +27,11 @@ No-ops:
 * ``/dashboard/load/<name>``
 * ``/events/get_data``
 
-Additional API calls:
-
-* ``/index`` (``POST`` or ``PUT`` only): rebuilds the search index by
-  recursively querying the storage backends for available paths. Replaces
-  graphite-web's ``build-index`` command-line script.
-
 Difference from graphite-web
 ----------------------------
 
 * Stateless. No need for a database.
-* No caching. Rendering is live.
-* No Pickle.
+* No Pickle rendering.
 * No remote rendering.
 * JSON data in request bodies is supported, additionally to form data and
   querystring parameters.
@@ -67,7 +59,7 @@ Documentation
 
 `On readthedocs.org`_ or in the ``docs/`` directory.
 
-.. _On readthedocs.org: http://graphite-api.readthedocs.org/en/latest/
+.. _On readthedocs.org: https://graphite-api.readthedocs.io/en/latest/
 
 Hacking
 -------
